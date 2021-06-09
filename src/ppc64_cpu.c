@@ -73,6 +73,15 @@ struct energy_freq_info {
 	int processor_folding_status;
 };
 
+enum energy_freq_attrs {
+	POWER_PERFORMANCE_MODE = 1,
+	IDLE_POWER_SAVER_STATUS = 2,
+	MIN_FREQ = 3,
+	STAT_FREQ = 4,
+	MAX_FREQ = 6,
+	PROC_FOLDING_STATUS = 8
+};
+
 #ifndef __NR_perf_event_open
 #define __NR_perf_event_open	319
 #endif
@@ -796,44 +805,55 @@ static void setrlimit_open_files(void)
 	setrlimit(RLIMIT_NOFILE, &new_rlim);
 }
 
+#define PAPR_VERSION 0x1
+
 static int report_platform_energy_freq_mode(struct energy_freq_info *eq)
 {
 	const char *path = "/sys/firmware/papr";
+	char v_buf[4], v_filename[64];
 	struct dirent *entry;
-	int i, num_files = 0;
 	struct stat s;
+	FILE *v_file;
 	DIR *dirp;
 
 	if (stat(path, &s) || !S_ISDIR(s.st_mode))
 		return -1;
 	dirp = opendir(path);
-	/*
-	 * Count the number of files in the directory using readir
-	 * files are not read during this time as readdir does not guarantee order
-	 */
+
+	/* Parse and match the verison */
+	sprintf(v_filename, "%s/version", path);
+	v_file = fopen(v_filename, "r");
+	if (!v_file)
+		return -1;
+	if (fgets(v_buf, 4, v_file) == NULL)
+		return -1;
+	fclose(v_file);
+
+	if (atoi(v_buf) != PAPR_VERSION)
+		return -1;
+
 	while ((entry = readdir(dirp)) != NULL) {
-		if (strcmp(entry->d_name,".") == 0 ||
-			strcmp(entry->d_name,"..") == 0)
-			continue;
-		if (entry->d_type == DT_REG)
-			num_files++;
-	}
-
-	for (i = 0; i < num_files/2; i++) {
-		char name_buf[64], val_buf[64];
-		char file_name[64];
+		char val_buf[64], file_name[320];
 		FILE *f;
+		int id;
 
-		sprintf(file_name, "%s/attr_%d_name", path, i);
-		f = fopen(file_name, "r");
-		if (!f)
-			return -1;
-		if (fgets(name_buf, 64, f) == NULL)
-			return -1;
-		name_buf[strcspn(name_buf, "\n")] = 0;
-		fclose(f);
+		/*
+		 * Exclude ., .., "version" and files ending with "name" as
+		 * we are only interested in values
+		 */
+		if (strcmp(entry->d_name,".") == 0 ||
+			strcmp(entry->d_name,"..") == 0 ||
+			strcmp(entry->d_name + strlen(entry->d_name) - 4,
+			       "name") == 0 ||
+			strcmp(entry->d_name,"version") == 0)
+			continue;
+		if (entry->d_type != DT_REG)
+			continue;
+		strcpy(file_name, entry->d_name);
+		/* Extract the attribute id from the filename i.e 2nd token */
+		id = atoi(strtok(NULL, strtok(file_name, "_")));
 
-		sprintf(file_name, "%s/attr_%d_val", path, i);
+		sprintf(file_name, "%s/%s", path, entry->d_name);
 		f = fopen(file_name, "r");
 		if (!f)
 			return -1;
@@ -841,19 +861,28 @@ static int report_platform_energy_freq_mode(struct energy_freq_info *eq)
 			return -1;
 		fclose(f);
 
-		if (!strcmp(name_buf, "Power and Performance Mode"))
+		switch(id){
+		case POWER_PERFORMANCE_MODE:
 			strcpy(eq->power_perf_mode, val_buf);
-		else if (!strcmp(name_buf, "Idle Power Saver Status"))
+			break;
+		case IDLE_POWER_SAVER_STATUS:
 			strcpy(eq->ips, val_buf);
-		else if (!strcmp(name_buf, "Minimum Frequency (MHz)"))
+			break;
+		case MIN_FREQ:
 			eq->min_freq_mhz = atoi(val_buf);
-		else if (!strcmp(name_buf, "Static Frequency (MHz)"))
+			break;
+		case STAT_FREQ:
 			eq->stat_freq_mhz = atoi(val_buf);
-		else if (!strcmp(name_buf, "Maximum Frequency (MHz)"))
+			break;
+		case MAX_FREQ:
 			eq->max_freq_mhz = atoi(val_buf);
-		else if (!strcmp(name_buf, "Processor Folding Status"))
+			break;
+		case PROC_FOLDING_STATUS:
 			eq->processor_folding_status = atoi(val_buf);
+			break;
+		}
 	}
+
 	closedir(dirp);
 
 	return 0;
